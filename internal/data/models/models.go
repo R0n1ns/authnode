@@ -23,12 +23,18 @@ type Role struct {
 	Name string `gorm:"unique;not null" json:"name"`
 }
 
+// OTP-код (верификация email)
+type OTP struct {
+	ID        uint           `gorm:"primaryKey" json:"id"`
+	Email     string         `gorm:"not null;index" json:"email"`
+	Code      string         `gorm:"not null" json:"code"`
+	ExpiresAt time.Time      `gorm:"not null" json:"expires_at"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
 // Модель для хранения кодов верификации
 type VerifyCode struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	Email     string    `gorm:"not null;index" json:"email"`
-	Code      int       `gorm:"not null" json:"code"`
-	ExpiresAt time.Time `gorm:"not null" json:"expires_at"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	OTP
 }
