@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+package auth;
+
+option go_package = "github.com/authmicro/api/proto";
+
+service AuthService {
+  // Registration
+  rpc CreateRegistration(RegistrationRequest) returns (RegistrationResponse) {}
+  rpc ConfirmEmail(ConfirmEmailRequest) returns (EmptyResponse) {}
+  rpc ResendCodeEmail(ResendCodeEmailRequest) returns (CodeResponse) {}
+  
+  // Login
+  rpc SendLoginCodeEmail(SendLoginCodeEmailRequest) returns (CodeResponse) {}
+  rpc ConfirmLogin(ConfirmLoginRequest) returns (TokenResponse) {}
+  
+  // Token
+  rpc RefreshToken(RefreshTokenRequest) returns (TokenResponse) {}
+  rpc ValidateToken(ValidateTokenRequest) returns (UserResponse) {}
+}
+
+// Registration
+message RegistrationRequest {
+  string firstName = 1;
+  string lastName = 2;
+  string nickname = 3;
+  string email = 4;
+  bool acceptedPrivacyPolicy = 5;
+}
+
+message RegistrationResponse {
+  string registrationSessionId = 1;
+  int64 codeExpires = 2;
+  string code = 3; // Only for debugging
+}
+
+message ConfirmEmailRequest {
+  string registrationSessionId = 1;
+  string code = 2;
+}
+
+message EmptyResponse {}
+
+message ResendCodeEmailRequest {
+  string registrationSessionId = 1;
+}
+
+// Login
+message SendLoginCodeEmailRequest {
+  string email = 1;
+}
+
+message CodeResponse {
+  int64 codeExpires = 1;
+  string code = 2; // Only for debugging
+}
+
+message ConfirmLoginRequest {
+  string email = 1;
+  string code = 2;
+}
+
+// Token
+message TokenResponse {
+  string accessToken = 1;
+  string refreshToken = 2;
+}
+
+message RefreshTokenRequest {
+  string refreshToken = 1;
+}
+
+message ValidateTokenRequest {
+  string accessToken = 1;
+}
+
+message UserResponse {
+  uint64 userId = 1;
+  string nickname = 2;
+  string email = 3;
+  string role = 4;
+}
