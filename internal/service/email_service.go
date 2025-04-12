@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/smtp"
 
-	"github.com/authmicro/configs"
+	"authmicro/configs"
 )
 
 type EmailService struct {

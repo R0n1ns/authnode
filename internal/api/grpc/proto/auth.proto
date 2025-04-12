@@ -1,0 +1,106 @@
+syntax = "proto3";
+
+package auth;
+
+option go_package = "authmicro/internal/api/grpc/proto";
+
+service AuthService {
+  // Registration
+  rpc CreateRegistrationSession(RegistrationRequest) returns (RegistrationSessionResponse) {}
+  rpc ConfirmEmail(ConfirmEmailRequest) returns (EmptyResponse) {}
+  rpc ResendVerificationCode(ResendCodeRequest) returns (RegistrationSessionResponse) {}
+
+  // Login
+  rpc SendLoginCode(LoginRequest) returns (RegistrationSessionResponse) {}
+  rpc ConfirmLogin(LoginConfirmRequest) returns (TokenResponse) {}
+
+  // Token
+  rpc RefreshToken(RefreshTokenRequest) returns (TokenResponse) {}
+
+  // Validation
+  rpc ValidateToken(ValidateTokenRequest) returns (ValidateTokenResponse) {}
+  rpc HasRole(HasRoleRequest) returns (HasRoleResponse) {}
+}
+
+// Registration messages
+message RegistrationRequest {
+  string firstName = 1;
+  string lastName = 2;
+  string nickname = 3;
+  string email = 4;
+  bool acceptedPrivacyPolicy = 5;
+}
+
+message RegistrationSessionResponse {
+  string registrationSessionId = 1;
+  int64 codeExpires = 2;
+  string code = 3; // Only for debugging
+}
+
+message ConfirmEmailRequest {
+  string registrationSessionId = 1;
+  string code = 2;
+}
+
+message ResendCodeRequest {
+  string registrationSessionId = 1;
+}
+
+// Login messages
+message LoginRequest {
+  string email = 1;
+}
+
+message LoginConfirmRequest {
+  string email = 1;
+  string code = 2;
+  string userAgent = 3;
+  string ip = 4;
+}
+
+// Token messages
+message TokenResponse {
+  string accessToken = 1;
+  string refreshToken = 2;
+}
+
+message RefreshTokenRequest {
+  string refreshToken = 1;
+  string userAgent = 2;
+  string ip = 3;
+}
+
+// Validation messages
+message ValidateTokenRequest {
+  string token = 1;
+}
+
+message ValidateTokenResponse {
+  bool valid = 1;
+  int64 userId = 2;
+  string email = 3;
+  string nickname = 4;
+  repeated string roles = 5;
+}
+
+message HasRoleRequest {
+  int64 userId = 1;
+  string roleName = 2;
+}
+
+message HasRoleResponse {
+  bool hasRole = 1;
+}
+
+// Utility messages
+message EmptyResponse {}
+
+message ErrorResponse {
+  string error = 1;
+  repeated FieldError detailedErrors = 2;
+}
+
+message FieldError {
+  string field = 1;
+  string message = 2;
+}

@@ -1,4 +1,4 @@
-module github.com/authmicro
+module authmicro
 
 go 1.21
 

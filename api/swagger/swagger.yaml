@@ -1,0 +1,368 @@
+openapi: 3.0.0
+info:
+  title: Auth Microservice API
+  description: Authentication and Authorization API
+  version: 1.0.0
+servers:
+  - url: /auth/v1
+    description: Authentication service
+paths:
+  /registration:
+    post:
+      summary: Create registration session
+      description: Initiates a new user registration process
+      operationId: createRegistration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegistrationRequest'
+      responses:
+        '200':
+          description: Registration session created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistrationResponse'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  
+  /registration/confirmEmail:
+    post:
+      summary: Confirm email during registration
+      description: Verifies the email using the verification code
+      operationId: confirmEmail
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmEmailRequest'
+      responses:
+        '200':
+          description: Email confirmed successfully
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  
+  /registration/resendCodeEmail:
+    post:
+      summary: Resend verification code
+      description: Resends the verification code to the email
+      operationId: resendCodeEmail
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResendCodeEmailRequest'
+      responses:
+        '200':
+          description: Verification code resent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CodeResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  
+  /login/sendCodeEmail:
+    post:
+      summary: Send login verification code
+      description: Sends a verification code to the email for login
+      operationId: sendLoginCodeEmail
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendLoginCodeEmailRequest'
+      responses:
+        '200':
+          description: Login verification code sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CodeResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  
+  /login/confirmEmail:
+    post:
+      summary: Confirm login
+      description: Verifies the login using the verification code and generates tokens
+      operationId: confirmLogin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmLoginRequest'
+      responses:
+        '200':
+          description: Login confirmed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  
+  /refreshToken:
+    post:
+      summary: Refresh token
+      description: Refreshes the access token using the refresh token
+      operationId: refreshToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshTokenRequest'
+      responses:
+        '200':
+          description: Token refreshed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  
+  /user:
+    get:
+      summary: Get user information
+      description: Returns information about the authenticated user
+      operationId: getUserInfo
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: User information retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    RegistrationRequest:
+      type: object
+      required:
+        - firstName
+        - lastName
+        - nickname
+        - email
+        - acceptedPrivacyPolicy
+      properties:
+        firstName:
+          type: string
+          description: User's first name
+        lastName:
+          type: string
+          description: User's last name
+        nickname:
+          type: string
+          description: User's nickname
+        email:
+          type: string
+          format: email
+          description: User's email address
+        acceptedPrivacyPolicy:
+          type: boolean
+          description: Indicates if the user accepted the privacy policy
+    
+    RegistrationResponse:
+      type: object
+      properties:
+        registrationSessionId:
+          type: string
+          format: uuid
+          description: Registration session ID
+        codeExpires:
+          type: integer
+          format: int64
+          description: Timestamp when the verification code expires
+        code:
+          type: string
+          description: Verification code (only for debugging)
+    
+    ConfirmEmailRequest:
+      type: object
+      required:
+        - registrationSessionId
+        - code
+      properties:
+        registrationSessionId:
+          type: string
+          format: uuid
+          description: Registration session ID
+        code:
+          type: string
+          description: Verification code
+    
+    ResendCodeEmailRequest:
+      type: object
+      required:
+        - registrationSessionId
+      properties:
+        registrationSessionId:
+          type: string
+          format: uuid
+          description: Registration session ID
+    
+    CodeResponse:
+      type: object
+      properties:
+        codeExpires:
+          type: integer
+          format: int64
+          description: Timestamp when the verification code expires
+        code:
+          type: string
+          description: Verification code (only for debugging)
+    
+    SendLoginCodeEmailRequest:
+      type: object
+      required:
+        - email
+      properties:
+        email:
+          type: string
+          format: email
+          description: User's email address
+    
+    ConfirmLoginRequest:
+      type: object
+      required:
+        - email
+        - code
+      properties:
+        email:
+          type: string
+          format: email
+          description: User's email address
+        code:
+          type: string
+          description: Verification code
+    
+    TokenResponse:
+      type: object
+      properties:
+        accessToken:
+          type: string
+          description: JWT access token
+        refreshToken:
+          type: string
+          description: JWT refresh token
+    
+    RefreshTokenRequest:
+      type: object
+      required:
+        - refreshToken
+      properties:
+        refreshToken:
+          type: string
+          description: JWT refresh token
+    
+    UserResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: User ID
+        nickname:
+          type: string
+          description: User's nickname
+        email:
+          type: string
+          format: email
+          description: User's email address
+        role:
+          type: string
+          description: User's role
+    
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message
+        detailedErrors:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+                description: Field with error
+              message:
+                type: string
+                description: Error message for the field
+  
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

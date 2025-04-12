@@ -1,0 +1,296 @@
+basePath: /
+definitions:
+  domain.ConfirmEmailRequest:
+    properties:
+      code:
+        type: string
+      registrationSessionId:
+        type: string
+    required:
+    - code
+    - registrationSessionId
+    type: object
+  domain.ErrorResponse:
+    properties:
+      detailedErrors:
+        items:
+          $ref: '#/definitions/domain.FieldError'
+        type: array
+      error:
+        type: string
+    type: object
+  domain.FieldError:
+    properties:
+      field:
+        type: string
+      message:
+        type: string
+    type: object
+  domain.LoginConfirmRequest:
+    properties:
+      code:
+        type: string
+      email:
+        type: string
+    required:
+    - code
+    - email
+    type: object
+  domain.LoginRequest:
+    properties:
+      email:
+        type: string
+    required:
+    - email
+    type: object
+  domain.LoginSessionResponse:
+    properties:
+      code:
+        description: Only for debugging
+        type: string
+      codeExpires:
+        type: integer
+    type: object
+  domain.RefreshTokenRequest:
+    properties:
+      refreshToken:
+        type: string
+    required:
+    - refreshToken
+    type: object
+  domain.RegistrationRequest:
+    properties:
+      acceptedPrivacyPolicy:
+        type: boolean
+      email:
+        type: string
+      firstName:
+        type: string
+      lastName:
+        type: string
+      nickname:
+        type: string
+    required:
+    - acceptedPrivacyPolicy
+    - email
+    - firstName
+    - lastName
+    - nickname
+    type: object
+  domain.RegistrationSessionResponse:
+    properties:
+      code:
+        description: Only for debugging
+        type: string
+      codeExpires:
+        type: integer
+      registrationSessionId:
+        type: string
+    type: object
+  domain.ResendCodeRequest:
+    properties:
+      registrationSessionId:
+        type: string
+    required:
+    - registrationSessionId
+    type: object
+  domain.TokenResponse:
+    properties:
+      accessToken:
+        type: string
+      refreshToken:
+        type: string
+    type: object
+host: localhost:8000
+info:
+  contact: {}
+  description: Authentication and authorization service API
+  title: Auth Service API
+  version: "1.0"
+paths:
+  /auth/v1/login/confirmEmail:
+    post:
+      consumes:
+      - application/json
+      description: Confirm login using a verification code sent to email
+      parameters:
+      - description: Login confirmation request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/domain.LoginConfirmRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.TokenResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/domain.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/domain.ErrorResponse'
+      summary: Confirm login
+      tags:
+      - auth
+  /auth/v1/login/sendCodeEmail:
+    post:
+      consumes:
+      - application/json
+      description: Send a login verification code to the user's email
+      parameters:
+      - description: Login request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/domain.LoginRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.LoginSessionResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/domain.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/domain.ErrorResponse'
+      summary: Send login code
+      tags:
+      - auth
+  /auth/v1/refreshToken:
+    post:
+      consumes:
+      - application/json
+      description: Refresh access token using a valid refresh token
+      parameters:
+      - description: Refresh token request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/domain.RefreshTokenRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.TokenResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/domain.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/domain.ErrorResponse'
+      summary: Refresh tokens
+      tags:
+      - auth
+  /auth/v1/registration:
+    post:
+      consumes:
+      - application/json
+      description: Create a new registration session for a user
+      parameters:
+      - description: Registration request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/domain.RegistrationRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.RegistrationSessionResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/domain.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/domain.ErrorResponse'
+      summary: Register a new user
+      tags:
+      - auth
+  /auth/v1/registration/confirmEmail:
+    post:
+      consumes:
+      - application/json
+      description: Confirm a user's email using a verification code
+      parameters:
+      - description: Confirm email request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/domain.ConfirmEmailRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/domain.ErrorResponse'
+      summary: Confirm email
+      tags:
+      - auth
+  /auth/v1/registration/resendCodeEmail:
+    post:
+      consumes:
+      - application/json
+      description: Resend a verification code to the user's email
+      parameters:
+      - description: Resend code request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/domain.ResendCodeRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.RegistrationSessionResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/domain.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/domain.ErrorResponse'
+      summary: Resend verification code
+      tags:
+      - auth
+schemes:
+- http
+- https
+securityDefinitions:
+  BearerAuth:
+    description: Type "Bearer" followed by a space and JWT token
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"

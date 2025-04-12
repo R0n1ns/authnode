@@ -41,8 +41,8 @@ func GenerateToken(
 	// Create the claims
 	claims := CustomClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(duration)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(time.Now().UTC().Add(duration)),
+			IssuedAt:  jwt.NewNumericDate(time.Now().UTC()),
 		},
 		UserID:   userID,
 		Email:    email,
@@ -81,7 +81,7 @@ func VerifyToken(tokenString string, secretKey string) (*CustomClaims, error) {
 	// Extract and verify claims
 	if claims, ok := token.Claims.(*CustomClaims); ok && token.Valid {
 		// Check if token is expired
-		if time.Now().After(claims.ExpiresAt.Time) {
+		if time.Now().UTC().After(claims.ExpiresAt.Time) {
 			return nil, errors.New("token has expired")
 		}
 		return claims, nil

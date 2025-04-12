@@ -41,7 +41,7 @@ func NewUser(
 	email string,
 	acceptedPrivacy bool,
 ) *User {
-	now := time.Now()
+	now := time.Now().UTC()
 	user := &User{
 		ID:                  id,
 		FirstName:           firstName,

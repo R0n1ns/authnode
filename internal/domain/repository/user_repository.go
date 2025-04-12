@@ -3,7 +3,7 @@ package repository
 import (
 	"context"
 
-	"github.com/authmicro/internal/domain/entity"
+	"authmicro/internal/domain/entity"
 )
 
 // UserRepository defines the interface for user repository operations

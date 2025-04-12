@@ -1,0 +1,196 @@
+Техническое задание на микро-сервис аутентификации и авторизации (Auth)
+1. Введение
+Цель проекта: Разработать микросервис аутентификации и авторизации пользователей, обеспечивающий безопасную регистрацию, вход, управление сессиями и правами доступа.
+Область применения: Микросервис предназначен для интеграции с веб, desktop и мобильными приложениями, использующими распределенную архитектуру.
+2. Требования к системе
+2.1 Функциональные требования
+Регистрация пользователей (Фамилия, Имя, email)
+Авторизация (одноразовым кодам на email)
+Управление сессиями (refreshToken, accessToken)
+Роли и права доступа (RBAC)
+Админ
+Пользователь
+Логирование действий пользователей. (Опционально)
+2.2 Нефункциональные требования
+Масштабируемость (горизонтальное масштабирование).
+Безопасность (шифрование данных, защита от атак).
+Совместимость с REST API (для клиент-серверного взаимодействия) и gRPC(для микро-сервисного взаимодействия).
+3. Архитектура системы
+Основные компоненты:
+API Gateway 
+маршрутизация
+rate limiting (опционально)
+Auth Service (основная логика аутентификации и авторизации)
+PostgreSQL (хранение данных пользователей, которые связаны с аутентификацией + роли)
+4. Технологический стек
+Язык программирования: Go.
+БД: PostgreSQL.
+API: REST, gRPC.
+Безопасность: JWT, OAuth 2.0.
+Контейнеризация: Docker, Kubernetes.
+Документация: Swagger
+5. REST API
+5.1 Регистрация
+5.1.1 Создание сессии регистрации (POST /auth/v1/registration)
+Требования к nickname:
+Уникальность
+Состоит только из латинские буквы в верхнем и нижнем регистрах, цифры (др символы запрещены)
+Возможные ошибки:
+Пустое поле (Относится ко всем полям)
+Такой nickname уже существует
+В nickname используются запрещённые символы
+Введенная строка не является электронной почтой
+Учебное заведение с доменом [domain] не зарегистрирован в StudBridge
+Не принято пользовательское соглашение 
+Общие ошибки
+Ошибки, которые пользователь НЕ должен получить:
+Данный email уже зарегистрирован (не возвращаем данную ошибку с целью сохранения приватности)
+Json:
+Входные данные:
+{
+    "firstName": "Peter", //Обязательное поле
+    "lastName": "Petrov", //Обязательное поле
+    "nickname": "peterpetrov", //Обязательное поле
+    "email": "peterpetrov@edu.ru", //Обязательное поле
+    “acceptedPrivacyPolicy”:true //Обязательное поле
+}
+Выходные данные: 
+success:
+{
+    "registrationSessionId": "0ee19bf4-80bb-45bb-9860-c2f58feaeee9", //Используем UUID для скрытия информации о количестве активных регистраций
+    "codeExpires": 1740559007, // timestamp
+    "code": "1234" // Поле только для отладки
+}
+error
+Общая ошибка
+{
+    "error": "Сервер не отвечает"
+}
+Ошибка с детальной информацией (400 Bad Request) 
+{
+    "error": "Ошибка регистрации",
+    "detailedErrors": [
+        {
+            "field": "firstName",
+            "message": "Поле пустое"
+        },
+        {
+            "field": "lastname",
+            "message": "Поле пустое"
+        },
+        {
+            "field": "nickname",
+            "message": "Поле пустое"
+        },
+        {
+            "field": "email",
+            "message": "Поле пустое"
+        },
+        {
+            "field": "acceptedPrivacyPolicy",
+            "message": "Не принято пользовательское соглашение"
+        }
+    ]
+}
+5.1.2 Подтверждение почты (POST /auth/v1/registration/confirmEmail)
+Возможные ошибки:
+Неверный или истекший код подтверждения. Пожалуйста, запросите новый код и попробуйте снова.
+Общие ошибки
+Ошибки, которые пользователь НЕ должен получить:
+registrationSessionId не существует (В таком случае всегда возвращаем 200)
+Json:
+Входные данные
+{
+    "registrationSessionId": "0ee19bf4-80bb-45bb-9860-c2f58feaeee9",
+    "code": "1234"
+}
+Выходные данные
+success (200) // Не конкретизируем 201 (created) 
+error
+{
+    "error": "Неверный или истекший код подтверждения. Пожалуйста, запросите новый код и попробуйте снова"
+}
+
+5.1.3 Повторная отправка кода подтверждения на почту (POST /auth/v1/registration/resendCodeEmail)
+Возможные ошибки:
+Общие ошибки
+Ошибки, которые пользователь НЕ должен получить:
+registrationSessionId не существует (В таком случае всегда возвращаем 200)
+Json:
+Входные данные
+{
+    "registrationSessionId": "0ee19bf4-80bb-45bb-9860-c2f58feaeee9"
+}
+Выходные данные
+success
+{
+    "codeExpires": 1740559007, // timestamp
+    "code": "1234" //Поле тольк для отладки
+}   
+error 
+{
+    "error": "Сервер не отвечает"
+}
+5.2. Вход
+5.2.1 Отправка кода подтверждения на почту (POST /auth/v1/login/sendCodeEmail)
+Возможные ошибки:
+Общие ошибки
+Ошибки, которые пользователь НЕ должен получить:
+Пользователь не существует или email не зарегистрирован (Возвращаем codeExpires и code)
+Json:
+Входные данные:
+{
+    "email": "example.email@ystu.ru"
+}
+Выходные данные: 
+success
+{
+    "codeExpires": 1740559007, // timestamp
+    "code": "1234" //Поле только для отладки
+}   
+error
+{
+    "error": "Сервер не отвечает"
+}
+5.2.2 Подтверждение почты (email) при помощи кода подтверждения (POST /auth/v1/login/confirmEmail)
+Возможные ошибки:
+Неверный или истекший код подтверждения. Пожалуйста, запросите новый код и попробуйте снова.
+Общие ошибки
+Ошибки, которые пользователь НЕ должен получить:
+email не существует (В таком случае всегда возвращаем 200)
+Json:
+Входные данные
+{
+    "email": "example.email@email.ru",
+    "code": "1234"
+}
+Выходные данные
+succes
+{
+    "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.KMUFsIDTnFmyG3nMiGM6H9FNFUROf3wh7SmqJp-QV30",
+    "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.KMUFsIDTnFmyG3nMiGM6H9FNFUROf3wh7SmqJp-QV30"
+}
+error
+{
+    "error": "Неверный или истекший код подтверждения. Пожалуйста, запросите новый код и попробуйте снова."
+}
+5.3 Обновление пары токенов (POST /auth/v1/refreshToken)
+Возможные ошибки:
+token expires - когда refreshToken истёк
+token invalid - когда token не проходит валидацию (Не понятный)
+Общие ошибки
+Json:
+Входные данные
+{
+    "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.KMUFsIDTnFmyG3nMiGM6H9FNFUROf3wh7SmqJp-QV30"
+}
+Выходные данные
+success
+{
+    "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.KMUFsIDTnFmyG3nMiGM6H9FNFUROf3wh7SmqJp-QV30",
+    "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.KMUFsIDTnFmyG3nMiGM6H9FNFUROf3wh7SmqJp-QV30"
+}
+error
+{
+    "error": "token expires"
+}

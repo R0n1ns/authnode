@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  authmicro:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"  # REST API
+      - "9000:9000"  # gRPC
+    depends_on:
+      - postgres
+    environment:
+      - PGHOST=postgres
+      - PGUSER=postgres
+      - PGPASSWORD=postgres
+      - PGDATABASE=auth
+      - PGPORT=5432
+      - PGSSLMODE=disable
+      - JWT_SECRET=my-super-secret-key
+      - JWT_ACCESS_EXPIRATION=15  # minutes
+      - JWT_REFRESH_EXPIRATION=10080  # 7 days in minutes
+      - HTTP_SERVER_ADDRESS=0.0.0.0:8000
+      - GRPC_SERVER_ADDRESS=0.0.0.0:9000
+      - LOG_LEVEL=debug
+    restart: unless-stopped
+    networks:
+      - auth-network
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5555:5555"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=auth
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - auth-network
+
+volumes:
+  postgres-data:
+
+networks:
+  auth-network:
+    driver: bridge

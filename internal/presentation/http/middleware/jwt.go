@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/authmicro/internal/domain/entity"
-	"github.com/authmicro/internal/domain/service"
+	"authmicro/internal/domain/entity"
+	"authmicro/internal/domain/service"
 	"github.com/gin-gonic/gin"
 )
 
