@@ -1,38 +1,52 @@
 package configs
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"time"
 )
 
-// Config holds all configuration for the service
 type Config struct {
+	Environment       string
 	DB                DBConfig
 	JWT               JWTConfig
+	OTP               OTPConfig
 	SMTP              SMTPConfig
 	HTTPServerAddress string
 	GRPCServerAddress string
+	ShutdownTimeout   time.Duration
 }
 
-// DBConfig holds database configuration
 type DBConfig struct {
-	Host     string
-	Port     string
-	Username string
-	Password string
-	DBName   string
-	SSLMode  string
+	Host            string
+	Port            string
+	Username        string
+	Password        string
+	DBName          string
+	SSLMode         string
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
+	ConnectTimeout  time.Duration
 }
 
-// JWTConfig holds JWT configuration
 type JWTConfig struct {
 	AccessTokenExpiration  time.Duration
 	RefreshTokenExpiration time.Duration
 	Secret                 string
+	Issuer                 string
+	Audience               string
 }
 
-// SMTPConfig holds email configuration
+type OTPConfig struct {
+	Pepper      string
+	Expiration  time.Duration
+	ResendDelay time.Duration
+	MaxAttempts int
+}
+
 type SMTPConfig struct {
 	Host     string
 	Port     int
@@ -41,49 +55,81 @@ type SMTPConfig struct {
 	From     string
 }
 
-// NewConfig initializes and returns a new Config
-func NewConfig() *Config {
-	return &Config{
+func Load() (*Config, error) {
+	cfg := &Config{
+		Environment: env("APP_ENV", "development"),
 		DB: DBConfig{
-			Host:     getEnv("PGHOST", "localhost"),
-			Port:     getEnv("PGPORT", "5432"),
-			Username: getEnv("PGUSER", "postgres"),
-			Password: getEnv("PGPASSWORD", "postgres"),
-			DBName:   getEnv("PGDATABASE", "auth_db"),
-			SSLMode:  getEnv("PGSSLMODE", "require"),
+			Host: env("PGHOST", "localhost"), Port: env("PGPORT", "5432"),
+			Username: env("PGUSER", "postgres"), Password: env("PGPASSWORD", "postgres"),
+			DBName: env("PGDATABASE", "auth"), SSLMode: env("PGSSLMODE", "disable"),
+			MaxOpenConns: envInt("DB_MAX_OPEN_CONNS", 20), MaxIdleConns: envInt("DB_MAX_IDLE_CONNS", 5),
+			ConnMaxLifetime: envDuration("DB_CONN_MAX_LIFETIME", time.Hour),
+			ConnectTimeout:  envDuration("DB_CONNECT_TIMEOUT", 10*time.Second),
 		},
 		JWT: JWTConfig{
-			AccessTokenExpiration:  time.Duration(getEnvAsInt("JWT_ACCESS_EXPIRATION", 15)) * time.Minute,
-			RefreshTokenExpiration: time.Duration(getEnvAsInt("JWT_REFRESH_EXPIRATION", 24*7)) * time.Hour,
-			Secret:                 getEnv("JWT_SECRET", "my-super-secret-key"),
+			AccessTokenExpiration:  envDuration("JWT_ACCESS_EXPIRATION", 15*time.Minute),
+			RefreshTokenExpiration: envDuration("JWT_REFRESH_EXPIRATION", 7*24*time.Hour),
+			Secret:                 os.Getenv("JWT_SECRET"), Issuer: env("JWT_ISSUER", "authnode"),
+			Audience: env("JWT_AUDIENCE", "authnode-api"),
+		},
+		OTP: OTPConfig{
+			Pepper: os.Getenv("OTP_PEPPER"), Expiration: envDuration("OTP_EXPIRATION", 10*time.Minute),
+			ResendDelay: envDuration("OTP_RESEND_DELAY", time.Minute), MaxAttempts: envInt("OTP_MAX_ATTEMPTS", 5),
 		},
 		SMTP: SMTPConfig{
-			Host:     getEnv("SMTP_HOST", "smtp.gmail.com"),
-			Port:     getEnvAsInt("SMTP_PORT", 587),
-			Username: getEnv("SMTP_USERNAME", ""),
-			Password: getEnv("SMTP_PASSWORD", ""),
-			From:     getEnv("SMTP_FROM", "no-reply@example.com"),
+			Host: env("SMTP_HOST", "localhost"), Port: envInt("SMTP_PORT", 1025),
+			Username: os.Getenv("SMTP_USERNAME"), Password: os.Getenv("SMTP_PASSWORD"),
+			From: env("SMTP_FROM", "no-reply@authnode.local"),
 		},
-		HTTPServerAddress: getEnv("HTTP_SERVER_ADDRESS", "0.0.0.0:8000"),
-		GRPCServerAddress: getEnv("GRPC_SERVER_ADDRESS", "0.0.0.0:9000"),
+		HTTPServerAddress: env("HTTP_SERVER_ADDRESS", "0.0.0.0:8000"),
+		GRPCServerAddress: env("GRPC_SERVER_ADDRESS", "0.0.0.0:9000"),
+		ShutdownTimeout:   envDuration("SHUTDOWN_TIMEOUT", 10*time.Second),
 	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
-// getEnv retrieves the value of the environment variable named by the key
-// If the variable is not present, it returns the fallback value
-func getEnv(key, fallback string) string {
-	if value, exists := os.LookupEnv(key); exists {
+func (c *Config) Validate() error {
+	var errs []error
+	if len(c.JWT.Secret) < 32 {
+		errs = append(errs, fmt.Errorf("JWT_SECRET must be at least 32 characters"))
+	}
+	if len(c.OTP.Pepper) < 32 {
+		errs = append(errs, fmt.Errorf("OTP_PEPPER must be at least 32 characters"))
+	}
+	if c.OTP.MaxAttempts < 1 {
+		errs = append(errs, errors.New("OTP_MAX_ATTEMPTS must be positive"))
+	}
+	if c.JWT.AccessTokenExpiration <= 0 || c.JWT.RefreshTokenExpiration <= 0 {
+		errs = append(errs, errors.New("token durations must be positive"))
+	}
+	if c.DB.MaxOpenConns < 1 || c.DB.MaxIdleConns < 0 {
+		errs = append(errs, errors.New("invalid database pool limits"))
+	}
+	return errors.Join(errs...)
+}
+
+func env(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
 		return value
 	}
 	return fallback
 }
 
-// getEnvAsInt retrieves the value of the environment variable named by the key as an int
-// If the variable is not present or cannot be parsed as an int, it returns the fallback value
-func getEnvAsInt(key string, fallback int) int {
-	valueStr := getEnv(key, "")
-	if value, err := strconv.Atoi(valueStr); err == nil {
-		return value
+func envInt(key string, fallback int) int {
+	value, err := strconv.Atoi(env(key, strconv.Itoa(fallback)))
+	if err != nil {
+		return fallback
 	}
-	return fallback
+	return value
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	value, err := time.ParseDuration(env(key, fallback.String()))
+	if err != nil {
+		return fallback
+	}
+	return value
 }

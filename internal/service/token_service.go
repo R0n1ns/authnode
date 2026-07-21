@@ -2,205 +2,109 @@ package service
 
 import (
 	"context"
-	"errors"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"fmt"
 	"time"
-
-	"github.com/golang-jwt/jwt/v5"
-	"github.com/google/uuid"
 
 	"authmicro/configs"
 	"authmicro/internal/domain"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 )
 
+type tokenSessionRepository interface {
+	CreateTokenSession(context.Context, domain.TokenSession) error
+	ConsumeTokenSession(context.Context, string) (domain.TokenSession, error)
+	DeleteUserTokenSessions(context.Context, int64) error
+}
+
 type TokenService struct {
-	config      configs.JWTConfig
-	sessionRepo sessionRepository
+	config configs.JWTConfig
+	repo   tokenSessionRepository
+	now    func() time.Time
 }
 
-func NewTokenService(config configs.JWTConfig, sessionRepo sessionRepository) *TokenService {
-	return &TokenService{
-		config:      config,
-		sessionRepo: sessionRepo,
-	}
+type accessClaims struct {
+	Email     string   `json:"email"`
+	Nickname  string   `json:"nickname"`
+	Roles     []string `json:"roles"`
+	TokenType string   `json:"token_type"`
+	jwt.RegisteredClaims
 }
 
-// GenerateTokenPair generates a new access and refresh token pair
-func (s *TokenService) GenerateTokenPair(ctx context.Context, user domain.User, roles []string) (domain.TokenPair, error) {
-	// Generate access token
-	accessToken, err := s.generateAccessToken(user, roles)
+func NewTokenService(c configs.JWTConfig, r tokenSessionRepository) *TokenService {
+	return &TokenService{config: c, repo: r, now: time.Now}
+}
+
+func (s *TokenService) IssuePair(ctx context.Context, u domain.User, roles []string, ua, ip string) (domain.TokenPair, error) {
+	access, err := s.accessToken(u, roles)
 	if err != nil {
 		return domain.TokenPair{}, err
 	}
-
-	// Generate refresh token
-	refreshToken, err := s.generateRefreshToken(user.ID)
+	refresh, err := randomToken()
 	if err != nil {
 		return domain.TokenPair{}, err
 	}
-
-	return domain.TokenPair{
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-	}, nil
+	now := s.now().UTC()
+	session := domain.TokenSession{ID: uuid.NewString(), UserID: u.ID, RefreshTokenHash: hashToken(refresh),
+		UserAgent: ua, IP: ip, CreatedAt: now, ExpiresAt: now.Add(s.config.RefreshTokenExpiration)}
+	if err = s.repo.CreateTokenSession(ctx, session); err != nil {
+		return domain.TokenPair{}, fmt.Errorf("store refresh session: %w", err)
+	}
+	return domain.TokenPair{AccessToken: access, RefreshToken: refresh}, nil
 }
 
-// ValidateToken validates a JWT token and returns the claims
-func (s *TokenService) ValidateToken(tokenString string) (*domain.TokenClaims, error) {
-	// Parse token
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		// Check signing method
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, errors.New("unexpected signing method")
-		}
-		return []byte(s.config.Secret), nil
-	})
-
-	if err != nil {
-		return nil, err
+func (s *TokenService) ConsumeRefreshToken(ctx context.Context, raw string) (domain.TokenSession, error) {
+	if raw == "" {
+		return domain.TokenSession{}, domain.ErrInvalidToken
 	}
-
-	// Check if token is valid
-	if !token.Valid {
-		return nil, errors.New("invalid token")
+	session, err := s.repo.ConsumeTokenSession(ctx, hashToken(raw))
+	if err != nil || !session.ExpiresAt.After(s.now().UTC()) {
+		return domain.TokenSession{}, domain.ErrInvalidToken
 	}
-
-	// Extract claims
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		return nil, errors.New("invalid token claims")
-	}
-
-	// Extract user data from claims
-	userID, ok := claims["userId"].(float64)
-	if !ok {
-		return nil, errors.New("invalid userId claim")
-	}
-
-	email, ok := claims["email"].(string)
-	if !ok {
-		return nil, errors.New("invalid email claim")
-	}
-
-	nickname, ok := claims["nickname"].(string)
-	if !ok {
-		return nil, errors.New("invalid nickname claim")
-	}
-
-	// Extract roles from claims
-	rolesInterface, ok := claims["roles"].([]interface{})
-	if !ok {
-		return nil, errors.New("invalid roles claim")
-	}
-
-	roles := make([]string, len(rolesInterface))
-	for i, role := range rolesInterface {
-		roles[i], ok = role.(string)
-		if !ok {
-			return nil, errors.New("invalid role in roles claim")
-		}
-	}
-
-	exp, ok := claims["exp"].(float64)
-	if !ok {
-		return nil, errors.New("invalid exp claim")
-	}
-
-	iat, ok := claims["iat"].(float64)
-	if !ok {
-		return nil, errors.New("invalid iat claim")
-	}
-
-	// Return token claims
-	return &domain.TokenClaims{
-		UserID:    int64(userID),
-		Email:     email,
-		Nickname:  nickname,
-		Roles:     roles,
-		ExpiresAt: int64(exp),
-		IssuedAt:  int64(iat),
-	}, nil
+	return session, nil
 }
 
-// StoreRefreshToken stores a refresh token in the database
-func (s *TokenService) StoreRefreshToken(ctx context.Context, userID int64, refreshToken, userAgent, ip string) error {
-	session := domain.TokenSession{
-		ID:           uuid.New().String(),
-		UserID:       userID,
-		RefreshToken: refreshToken,
-		UserAgent:    userAgent,
-		IP:           ip,
-		ExpiresAt:    time.Now().UTC().Add(s.config.RefreshTokenExpiration),
-		CreatedAt:    time.Now().UTC(),
-	}
-
-	return s.sessionRepo.CreateTokenSession(ctx, session)
+func (s *TokenService) RevokeAll(ctx context.Context, userID int64) error {
+	return s.repo.DeleteUserTokenSessions(ctx, userID)
 }
 
-// RevokeRefreshToken revokes a refresh token
-func (s *TokenService) RevokeRefreshToken(ctx context.Context, refreshToken string) error {
-	// Get token session
-	session, err := s.sessionRepo.GetTokenSession(ctx, refreshToken)
-	if err != nil {
-		return err
+func (s *TokenService) ValidateToken(raw string) (*domain.TokenClaims, error) {
+	c := new(accessClaims)
+	token, err := jwt.ParseWithClaims(raw, c, func(*jwt.Token) (any, error) { return []byte(s.config.Secret), nil },
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}), jwt.WithIssuer(s.config.Issuer),
+		jwt.WithAudience(s.config.Audience), jwt.WithExpirationRequired())
+	if err != nil || !token.Valid || c.TokenType != "access" {
+		return nil, domain.ErrInvalidToken
 	}
-
-	// Delete token session
-	return s.sessionRepo.DeleteTokenSession(ctx, session.ID)
+	var userID int64
+	if _, err = fmt.Sscan(c.Subject, &userID); err != nil || userID < 1 {
+		return nil, domain.ErrInvalidToken
+	}
+	return &domain.TokenClaims{UserID: userID, Email: c.Email, Nickname: c.Nickname, Roles: c.Roles,
+		ExpiresAt: c.ExpiresAt.Unix(), IssuedAt: c.IssuedAt.Unix(), TokenID: c.ID}, nil
 }
 
-// RevokeAllUserTokens revokes all tokens for a user
-func (s *TokenService) RevokeAllUserTokens(ctx context.Context, userID int64) error {
-	return s.sessionRepo.DeleteUserTokenSessions(ctx, userID)
+func (s *TokenService) accessToken(u domain.User, roles []string) (string, error) {
+	now := s.now().UTC()
+	c := accessClaims{Email: u.Email, Nickname: u.Nickname, Roles: roles, TokenType: "access",
+		RegisteredClaims: jwt.RegisteredClaims{Issuer: s.config.Issuer, Subject: fmt.Sprint(u.ID),
+			Audience: jwt.ClaimStrings{s.config.Audience}, ID: uuid.NewString(), IssuedAt: jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(s.config.AccessTokenExpiration))}}
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, c).SignedString([]byte(s.config.Secret))
 }
 
-// generateAccessToken generates a new access token
-func (s *TokenService) generateAccessToken(user domain.User, roles []string) (string, error) {
-	// Set token expiration time
-	expirationTime := time.Now().UTC().Add(s.config.AccessTokenExpiration)
-
-	// Create claims
-	claims := jwt.MapClaims{
-		"userId":   user.ID,
-		"email":    user.Email,
-		"nickname": user.Nickname,
-		"roles":    roles,
-		"exp":      expirationTime.Unix(),
-		"iat":      time.Now().UTC().Unix(),
-	}
-
-	// Create token
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-
-	// Sign token
-	tokenString, err := token.SignedString([]byte(s.config.Secret))
-	if err != nil {
+func randomToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-
-	return tokenString, nil
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
-
-// generateRefreshToken generates a new refresh token
-func (s *TokenService) generateRefreshToken(userID int64) (string, error) {
-	// Set token expiration time
-	expirationTime := time.Now().UTC().Add(s.config.RefreshTokenExpiration)
-
-	// Create claims
-	claims := jwt.MapClaims{
-		"userId": userID,
-		"exp":    expirationTime.Unix(),
-		"iat":    time.Now().UTC().Unix(),
-		"jti":    uuid.New().String(), // JWT ID for the token
-	}
-
-	// Create token
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-
-	// Sign token
-	tokenString, err := token.SignedString([]byte(s.config.Secret))
-	if err != nil {
-		return "", err
-	}
-
-	return tokenString, nil
+func hashToken(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
 }

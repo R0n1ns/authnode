@@ -1,0 +1,7 @@
+.git
+.github
+.idea
+.env
+*.md
+coverage.out
+bin

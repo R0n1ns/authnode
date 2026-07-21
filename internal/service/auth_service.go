@@ -2,467 +2,271 @@ package service
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"math/rand"
+	"math/big"
+	"net/mail"
 	"regexp"
+	"strings"
 	"time"
 
+	"authmicro/configs"
 	"authmicro/internal/domain"
 	"authmicro/pkg/logger"
 )
 
 type userRepository interface {
-	Create(ctx context.Context, user domain.User) (int64, error)
-	GetByID(ctx context.Context, id int64) (domain.User, error)
-	GetByEmail(ctx context.Context, email string) (domain.User, error)
-	GetByNickname(ctx context.Context, nickname string) (domain.User, error)
-	UpdateEmailVerificationStatus(ctx context.Context, userID int64, verified bool) error
-	NicknameExists(ctx context.Context, nickname string) (bool, error)
-	EmailExists(ctx context.Context, email string) (bool, error)
+	GetByID(context.Context, int64) (domain.User, error)
+	GetByEmail(context.Context, string) (domain.User, error)
+	NicknameExists(context.Context, string) (bool, error)
+	EmailExists(context.Context, string) (bool, error)
 }
-
 type roleRepository interface {
-	CreateRole(ctx context.Context, name string) (int64, error)
-	GetRoleByName(ctx context.Context, name string) (domain.Role, error)
-	GetRoleByID(ctx context.Context, id int64) (domain.Role, error)
-	AssignRoleToUser(ctx context.Context, userID, roleID int64) error
-	GetUserRoles(ctx context.Context, userID int64) ([]domain.Role, error)
-	GetUserRoleNames(ctx context.Context, userID int64) ([]string, error)
-	RemoveRoleFromUser(ctx context.Context, userID, roleID int64) error
-	HasRole(ctx context.Context, userID int64, roleName string) (bool, error)
+	GetUserRoleNames(context.Context, int64) ([]string, error)
+	HasRole(context.Context, int64, string) (bool, error)
 }
-
 type sessionRepository interface {
-	CreateRegistrationSession(ctx context.Context, session domain.RegistrationSession) (string, error)
-	GetRegistrationSession(ctx context.Context, id string) (domain.RegistrationSession, error)
-	UpdateRegistrationSessionCode(ctx context.Context, id, code string, expires time.Time) error
-	DeleteRegistrationSession(ctx context.Context, id string) error
-	CreateLoginSession(ctx context.Context, session domain.LoginSession) (string, error)
-	GetLoginSessionByEmailAndCode(ctx context.Context, email, code string) (domain.LoginSession, error)
-	DeleteLoginSession(ctx context.Context, id string) error
-	DeleteExpiredLoginSessions(ctx context.Context) error
-	CreateTokenSession(ctx context.Context, session domain.TokenSession) error
-	GetTokenSession(ctx context.Context, refreshToken string) (domain.TokenSession, error)
-	DeleteTokenSession(ctx context.Context, id string) error
-	DeleteExpiredTokenSessions(ctx context.Context) error
-	DeleteUserTokenSessions(ctx context.Context, userID int64) error
+	CreateRegistrationSession(context.Context, domain.RegistrationSession) (string, error)
+	GetRegistrationSession(context.Context, string) (domain.RegistrationSession, error)
+	UpdateRegistrationCode(context.Context, string, string, time.Time, time.Time, time.Duration) error
+	IncrementRegistrationAttempts(context.Context, string) error
+	CompleteRegistration(context.Context, string, domain.User, string) error
+	UpsertLoginSession(context.Context, domain.LoginSession, time.Duration) error
+	GetLoginSession(context.Context, string) (domain.LoginSession, error)
+	IncrementLoginAttempts(context.Context, string) error
+	DeleteLoginSession(context.Context, string) error
 }
-
-type tokenService interface {
-	GenerateTokenPair(ctx context.Context, user domain.User, roles []string) (domain.TokenPair, error)
-	ValidateToken(token string) (*domain.TokenClaims, error)
-	StoreRefreshToken(ctx context.Context, userID int64, refreshToken, userAgent, ip string) error
-	RevokeRefreshToken(ctx context.Context, refreshToken string) error
+type tokenIssuer interface {
+	IssuePair(context.Context, domain.User, []string, string, string) (domain.TokenPair, error)
+	ConsumeRefreshToken(context.Context, string) (domain.TokenSession, error)
+	ValidateToken(string) (*domain.TokenClaims, error)
+	RevokeAll(context.Context, int64) error
 }
-
-type emailService interface {
-	SendVerificationCode(to, code string) error
-}
+type mailer interface{ SendVerificationCode(string, string) error }
 
 type AuthService struct {
-	userRepo    userRepository
-	roleRepo    roleRepository
-	sessionRepo sessionRepository
-	tokenSvc    tokenService
-	emailSvc    emailService
-	logger      logger.Logger
+	users    userRepository
+	roles    roleRepository
+	sessions sessionRepository
+	tokens   tokenIssuer
+	mailer   mailer
+	otp      configs.OTPConfig
+	logger   logger.Logger
+	now      func() time.Time
 }
 
-func NewAuthService(
-	userRepo userRepository,
-	roleRepo roleRepository,
-	sessionRepo sessionRepository,
-	tokenSvc tokenService,
-	emailSvc emailService,
-	logger logger.Logger,
-) *AuthService {
-	return &AuthService{
-		userRepo:    userRepo,
-		roleRepo:    roleRepo,
-		sessionRepo: sessionRepo,
-		tokenSvc:    tokenSvc,
-		emailSvc:    emailSvc,
-		logger:      logger,
-	}
+func NewAuthService(u userRepository, r roleRepository, s sessionRepository, t tokenIssuer, m mailer, l logger.Logger, otp configs.OTPConfig) *AuthService {
+	return &AuthService{users: u, roles: r, sessions: s, tokens: t, mailer: m, logger: l, otp: otp, now: time.Now}
 }
 
-// CreateRegistrationSession creates a new registration session
 func (s *AuthService) CreateRegistrationSession(ctx context.Context, req domain.RegistrationRequest) (*domain.RegistrationSessionResponse, []domain.FieldError, error) {
-	var fieldErrors []domain.FieldError
-
-	// Validate firstName
-	if req.FirstName == "" {
-		fieldErrors = append(fieldErrors, domain.FieldError{
-			Field:   "firstName",
-			Message: "Поле пустое",
-		})
+	req.FirstName = strings.TrimSpace(req.FirstName)
+	req.LastName = strings.TrimSpace(req.LastName)
+	req.Nickname = strings.TrimSpace(req.Nickname)
+	req.Email = normalizeEmail(req.Email)
+	fields := validateRegistration(req)
+	if len(fields) > 0 {
+		return nil, fields, nil
 	}
-
-	// Validate lastName
-	if req.LastName == "" {
-		fieldErrors = append(fieldErrors, domain.FieldError{
-			Field:   "lastName",
-			Message: "Поле пустое",
-		})
+	if exists, err := s.users.NicknameExists(ctx, req.Nickname); err != nil {
+		return nil, nil, err
+	} else if exists {
+		fields = append(fields, domain.FieldError{Field: "nickname", Message: "nickname is already in use"})
 	}
-
-	// Validate nickname
-	if req.Nickname == "" {
-		fieldErrors = append(fieldErrors, domain.FieldError{
-			Field:   "nickname",
-			Message: "Поле пустое",
-		})
-	} else {
-		// Check if nickname contains only allowed characters
-		matched, _ := regexp.MatchString(`^[a-zA-Z0-9]+$`, req.Nickname)
-		if !matched {
-			fieldErrors = append(fieldErrors, domain.FieldError{
-				Field:   "nickname",
-				Message: "В nickname используются запрещённые символы",
-			})
-		} else {
-			// Check if nickname is unique
-			exists, err := s.userRepo.NicknameExists(ctx, req.Nickname)
-			if err != nil {
-				s.logger.Errorf("Error checking nickname existence: %v", err)
-				return nil, nil, err
-			}
-			if exists {
-				fieldErrors = append(fieldErrors, domain.FieldError{
-					Field:   "nickname",
-					Message: "Такой nickname уже существует",
-				})
-			}
-		}
+	if exists, err := s.users.EmailExists(ctx, req.Email); err != nil {
+		return nil, nil, err
+	} else if exists {
+		fields = append(fields, domain.FieldError{Field: "email", Message: "email is already registered"})
 	}
-
-	// Validate email
-	if req.Email == "" {
-		fieldErrors = append(fieldErrors, domain.FieldError{
-			Field:   "email",
-			Message: "Поле пустое",
-		})
-	} else {
-		// Check if email is valid
-		matched, _ := regexp.MatchString(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`, req.Email)
-		if !matched {
-			fieldErrors = append(fieldErrors, domain.FieldError{
-				Field:   "email",
-				Message: "Введенная строка не является электронной почтой",
-			})
-		}
+	if len(fields) > 0 {
+		return nil, fields, nil
 	}
-
-	// Validate acceptedPrivacyPolicy
-	if !req.AcceptedPrivacyPolicy {
-		fieldErrors = append(fieldErrors, domain.FieldError{
-			Field:   "acceptedPrivacyPolicy",
-			Message: "Не принято пользовательское соглашение",
-		})
-	}
-
-	// Return errors if any
-	if len(fieldErrors) > 0 {
-		return nil, fieldErrors, nil
-	}
-
-	// Generate verification code
-	code := generateCode()
-	codeExpires := time.Now().UTC().Add(15 * time.Minute)
-
-	// Create registration session
-	session := domain.RegistrationSession{
-		FirstName:             req.FirstName,
-		LastName:              req.LastName,
-		Nickname:              req.Nickname,
-		Email:                 req.Email,
-		AcceptedPrivacyPolicy: req.AcceptedPrivacyPolicy,
-		Code:                  code,
-		CodeExpires:           codeExpires,
-		CreatedAt:             time.Now().UTC(),
-	}
-
-	sessionID, err := s.sessionRepo.CreateRegistrationSession(ctx, session)
+	code, err := generateOTP()
 	if err != nil {
-		s.logger.Errorf("Error creating registration session: %v", err)
 		return nil, nil, err
 	}
-
-	// Send verification code
-	err = s.emailSvc.SendVerificationCode(req.Email, code)
+	now := s.now().UTC()
+	expires := now.Add(s.otp.Expiration)
+	id, err := s.sessions.CreateRegistrationSession(ctx, domain.RegistrationSession{
+		FirstName: req.FirstName, LastName: req.LastName, Nickname: req.Nickname, Email: req.Email,
+		AcceptedPrivacyPolicy: req.AcceptedPrivacyPolicy, CodeHash: s.hashOTP(code), CodeExpires: expires,
+		LastSentAt: now, CreatedAt: now})
 	if err != nil {
-		s.logger.Errorf("Error sending verification code: %v", err)
-		// We don't want to fail the registration process if email sending fails
-		// Just log the error and continue
+		return nil, nil, err
 	}
-
-	return &domain.RegistrationSessionResponse{
-		RegistrationSessionID: sessionID,
-		CodeExpires:           codeExpires.Unix(),
-		Code:                  code, // Only for debugging
-	}, nil, nil
+	if err = s.mailer.SendVerificationCode(req.Email, code); err != nil {
+		return nil, nil, fmt.Errorf("send verification email: %w", err)
+	}
+	return &domain.RegistrationSessionResponse{RegistrationSessionID: id, CodeExpires: expires.Unix()}, nil, nil
 }
 
-// ConfirmEmail confirms a user's email during registration
 func (s *AuthService) ConfirmEmail(ctx context.Context, req domain.ConfirmEmailRequest) error {
-	// Get registration session
-	session, err := s.sessionRepo.GetRegistrationSession(ctx, req.RegistrationSessionID)
+	session, err := s.sessions.GetRegistrationSession(ctx, req.RegistrationSessionID)
 	if err != nil {
-		// Don't expose that the session doesn't exist
-		return errors.New("Неверный или истекший код подтверждения. Пожалуйста, запросите новый код и попробуйте снова")
+		return domain.ErrInvalidCode
 	}
-
-	// Check if code is valid and not expired
-	if session.Code != req.Code || time.Now().UTC().After(session.CodeExpires) {
-		fmt.Println(session)
-		return errors.New("Неверный или истекший код подтверждения. Пожалуйста, запросите новый код и попробуйте снова")
+	if session.Attempts >= s.otp.MaxAttempts || !session.CodeExpires.After(s.now().UTC()) {
+		return domain.ErrInvalidCode
 	}
-
-	// Create new user
-	user := domain.User{
-		FirstName:             session.FirstName,
-		LastName:              session.LastName,
-		Nickname:              session.Nickname,
-		Email:                 session.Email,
-		EmailVerified:         true,
-		AcceptedPrivacyPolicy: session.AcceptedPrivacyPolicy,
+	if !hmac.Equal([]byte(session.CodeHash), []byte(s.hashOTP(req.Code))) {
+		_ = s.sessions.IncrementRegistrationAttempts(ctx, session.ID)
+		return domain.ErrInvalidCode
 	}
-
-	userID, err := s.userRepo.Create(ctx, user)
-	if err != nil {
-		s.logger.Errorf("Error creating user: %v", err)
-		return err
+	user := domain.User{FirstName: session.FirstName, LastName: session.LastName, Nickname: session.Nickname,
+		Email: session.Email, EmailVerified: true, AcceptedPrivacyPolicy: session.AcceptedPrivacyPolicy}
+	if err = s.sessions.CompleteRegistration(ctx, session.ID, user, domain.DefaultRoles.User); err != nil {
+		return fmt.Errorf("complete registration: %w", err)
 	}
-
-	// Assign default user role
-	role, err := s.roleRepo.GetRoleByName(ctx, domain.DefaultRoles.User)
-	if err != nil {
-		s.logger.Errorf("Error getting default user role: %v", err)
-		return err
-	}
-
-	err = s.roleRepo.AssignRoleToUser(ctx, userID, role.ID)
-	if err != nil {
-		s.logger.Errorf("Error assigning role to user: %v", err)
-		return err
-	}
-
-	// Delete registration session
-	err = s.sessionRepo.DeleteRegistrationSession(ctx, req.RegistrationSessionID)
-	if err != nil {
-		s.logger.Errorf("Error deleting registration session: %v", err)
-		// Don't fail if we can't delete the session
-	}
-
 	return nil
 }
 
-// ResendVerificationCode resends the verification code for a registration session
 func (s *AuthService) ResendVerificationCode(ctx context.Context, req domain.ResendCodeRequest) (*domain.RegistrationSessionResponse, error) {
-	// Get registration session
-	session, err := s.sessionRepo.GetRegistrationSession(ctx, req.RegistrationSessionID)
+	session, err := s.sessions.GetRegistrationSession(ctx, req.RegistrationSessionID)
+	now := s.now().UTC()
+	expires := now.Add(s.otp.Expiration)
 	if err != nil {
-		// Don't expose that the session doesn't exist
-		return &domain.RegistrationSessionResponse{
-			RegistrationSessionID: req.RegistrationSessionID,
-			CodeExpires:           time.Now().UTC().Add(15 * time.Minute).Unix(),
-			Code:                  generateCode(), // Only for debugging
-		}, nil
+		return &domain.RegistrationSessionResponse{RegistrationSessionID: req.RegistrationSessionID, CodeExpires: expires.Unix()}, nil
 	}
-
-	// Generate new verification code
-	code := generateCode()
-	codeExpires := time.Now().UTC().Add(15 * time.Minute)
-
-	// Update registration session
-	err = s.sessionRepo.UpdateRegistrationSessionCode(ctx, req.RegistrationSessionID, code, codeExpires)
+	code, err := generateOTP()
 	if err != nil {
-		s.logger.Errorf("Error updating registration session code: %v", err)
 		return nil, err
 	}
-
-	// Send verification code
-	err = s.emailSvc.SendVerificationCode(session.Email, code)
-	if err != nil {
-		s.logger.Errorf("Error sending verification code: %v", err)
-		// We don't want to fail the registration process if email sending fails
-		// Just log the error and continue
+	if err = s.sessions.UpdateRegistrationCode(ctx, session.ID, s.hashOTP(code), expires, now, s.otp.ResendDelay); err != nil {
+		return nil, err
 	}
-
-	return &domain.RegistrationSessionResponse{
-		RegistrationSessionID: req.RegistrationSessionID,
-		CodeExpires:           codeExpires.Unix(),
-		Code:                  code, // Only for debugging
-	}, nil
+	if err = s.mailer.SendVerificationCode(session.Email, code); err != nil {
+		return nil, fmt.Errorf("send verification email: %w", err)
+	}
+	return &domain.RegistrationSessionResponse{RegistrationSessionID: session.ID, CodeExpires: expires.Unix()}, nil
 }
 
-// SendLoginCode sends a login code to a user's email
 func (s *AuthService) SendLoginCode(ctx context.Context, req domain.LoginRequest) (*domain.LoginSessionResponse, error) {
-	// Generate verification code
-	code := generateCode()
-	codeExpires := time.Now().UTC().Add(15 * time.Minute)
-
-	// Create login session
-	session := domain.LoginSession{
-		Email:       req.Email,
-		Code:        code,
-		CodeExpires: codeExpires,
-		CreatedAt:   time.Now().UTC(),
+	email := normalizeEmail(req.Email)
+	now := s.now().UTC()
+	expires := now.Add(s.otp.Expiration)
+	if _, err := mail.ParseAddress(email); err != nil {
+		return nil, domain.ErrInvalidInput
 	}
-
-	_, err := s.sessionRepo.CreateLoginSession(ctx, session)
+	user, err := s.users.GetByEmail(ctx, email)
 	if err != nil {
-		s.logger.Errorf("Error creating login session: %v", err)
+		return &domain.LoginSessionResponse{CodeExpires: expires.Unix()}, nil
+	}
+	code, err := generateOTP()
+	if err != nil {
 		return nil, err
 	}
-
-	// Check if the email exists
-	_, err = s.userRepo.GetByEmail(ctx, req.Email)
-	if err == nil {
-		// If email exists, send verification code
-		err = s.emailSvc.SendVerificationCode(req.Email, code)
-		if err != nil {
-			s.logger.Errorf("Error sending verification code: %v", err)
-			// We don't want to fail the login process if email sending fails
-			// Just log the error and continue
-		}
-	} else {
-		// If email doesn't exist, we still return a success response for privacy reasons
-		// But we don't actually send an email
-		s.logger.Infof("Login attempt with non-existent email: %s", req.Email)
+	err = s.sessions.UpsertLoginSession(ctx, domain.LoginSession{Email: user.Email, CodeHash: s.hashOTP(code),
+		CodeExpires: expires, LastSentAt: now, CreatedAt: now}, s.otp.ResendDelay)
+	if err != nil {
+		return nil, err
 	}
-
-	return &domain.LoginSessionResponse{
-		CodeExpires: codeExpires.Unix(),
-		Code:        code, // Only for debugging
-	}, nil
+	if err = s.mailer.SendVerificationCode(user.Email, code); err != nil {
+		return nil, fmt.Errorf("send login email: %w", err)
+	}
+	return &domain.LoginSessionResponse{CodeExpires: expires.Unix()}, nil
 }
 
-// ConfirmLogin confirms a login attempt with a verification code
-func (s *AuthService) ConfirmLogin(ctx context.Context, req domain.LoginConfirmRequest, userAgent, ip string) (*domain.TokenResponse, error) {
-	// Get login session
-	session, err := s.sessionRepo.GetLoginSessionByEmailAndCode(ctx, req.Email, req.Code)
-	if err != nil {
-
-		return nil, errors.New("неверный или истекший код подтверждения. Пожалуйста, запросите новый код и попробуйте снова")
+func (s *AuthService) ConfirmLogin(ctx context.Context, req domain.LoginConfirmRequest, ua, ip string) (*domain.TokenResponse, error) {
+	session, err := s.sessions.GetLoginSession(ctx, normalizeEmail(req.Email))
+	if err != nil || session.Attempts >= s.otp.MaxAttempts || !session.CodeExpires.After(s.now().UTC()) {
+		return nil, domain.ErrInvalidCode
 	}
-
-	// Get user by email
-	user, err := s.userRepo.GetByEmail(ctx, req.Email)
-	if err != nil {
-		return nil, errors.New("неверный или истекший код подтверждения. Пожалуйста, запросите новый код и попробуйте снова")
+	if !hmac.Equal([]byte(session.CodeHash), []byte(s.hashOTP(req.Code))) {
+		_ = s.sessions.IncrementLoginAttempts(ctx, session.ID)
+		return nil, domain.ErrInvalidCode
 	}
-
-	// Get user roles
-	roles, err := s.roleRepo.GetUserRoleNames(ctx, user.ID)
+	user, err := s.users.GetByEmail(ctx, session.Email)
 	if err != nil {
-		s.logger.Errorf("Error getting user roles: %v", err)
+		return nil, domain.ErrInvalidCode
+	}
+	roles, err := s.roles.GetUserRoleNames(ctx, user.ID)
+	if err != nil {
 		return nil, err
 	}
-
-	// Generate token pair
-	tokenPair, err := s.tokenSvc.GenerateTokenPair(ctx, user, roles)
+	pair, err := s.tokens.IssuePair(ctx, user, roles, ua, ip)
 	if err != nil {
-		s.logger.Errorf("Error generating token pair: %v", err)
 		return nil, err
 	}
-
-	// Store refresh token
-	err = s.tokenSvc.StoreRefreshToken(ctx, user.ID, tokenPair.RefreshToken, userAgent, ip)
-	if err != nil {
-		s.logger.Errorf("Error storing refresh token: %v", err)
+	if err = s.sessions.DeleteLoginSession(ctx, session.ID); err != nil {
 		return nil, err
 	}
-
-	// Delete login session
-	err = s.sessionRepo.DeleteLoginSession(ctx, session.ID)
-	if err != nil {
-		s.logger.Errorf("Error deleting login session: %v", err)
-		// Don't fail if we can't delete the session
-	}
-
-	return &domain.TokenResponse{
-		AccessToken:  tokenPair.AccessToken,
-		RefreshToken: tokenPair.RefreshToken,
-	}, nil
+	return &domain.TokenResponse{AccessToken: pair.AccessToken, RefreshToken: pair.RefreshToken}, nil
 }
 
-// RefreshToken refreshes an access token using a refresh token
-func (s *AuthService) RefreshToken(ctx context.Context, req domain.RefreshTokenRequest, userAgent, ip string) (*domain.TokenResponse, error) {
-	// Get token session
-	tokenSession, err := s.sessionRepo.GetTokenSession(ctx, req.RefreshToken)
+func (s *AuthService) RefreshToken(ctx context.Context, req domain.RefreshTokenRequest, ua, ip string) (*domain.TokenResponse, error) {
+	old, err := s.tokens.ConsumeRefreshToken(ctx, req.RefreshToken)
 	if err != nil {
-		if err.Error() == "token expires" {
-			return nil, errors.New("token expires")
-		}
-		s.logger.Errorf("Error getting token session: %v", err)
-		return nil, errors.New("token invalid")
+		return nil, domain.ErrInvalidToken
 	}
-
-	// Get user by ID
-	user, err := s.userRepo.GetByID(ctx, tokenSession.UserID)
-	if err != nil {
-		s.logger.Errorf("Error getting user by ID: %v", err)
-		return nil, errors.New("token invalid")
+	if old.UserAgent != "" && ua != "" && old.UserAgent != ua {
+		return nil, domain.ErrInvalidToken
 	}
-
-	// Get user roles
-	roles, err := s.roleRepo.GetUserRoleNames(ctx, user.ID)
+	user, err := s.users.GetByID(ctx, old.UserID)
 	if err != nil {
-		s.logger.Errorf("Error getting user roles: %v", err)
+		return nil, domain.ErrInvalidToken
+	}
+	roles, err := s.roles.GetUserRoleNames(ctx, user.ID)
+	if err != nil {
 		return nil, err
 	}
-
-	// Revoke old refresh token
-	err = s.tokenSvc.RevokeRefreshToken(ctx, req.RefreshToken)
+	pair, err := s.tokens.IssuePair(ctx, user, roles, ua, ip)
 	if err != nil {
-		s.logger.Errorf("Error revoking refresh token: %v", err)
-		// Don't fail if we can't revoke the token
-	}
-
-	// Generate new token pair
-	tokenPair, err := s.tokenSvc.GenerateTokenPair(ctx, user, roles)
-	if err != nil {
-		s.logger.Errorf("Error generating token pair: %v", err)
 		return nil, err
 	}
-
-	// Store new refresh token
-	err = s.tokenSvc.StoreRefreshToken(ctx, user.ID, tokenPair.RefreshToken, userAgent, ip)
-	if err != nil {
-		s.logger.Errorf("Error storing refresh token: %v", err)
-		return nil, err
-	}
-
-	return &domain.TokenResponse{
-		AccessToken:  tokenPair.AccessToken,
-		RefreshToken: tokenPair.RefreshToken,
-	}, nil
+	return &domain.TokenResponse{AccessToken: pair.AccessToken, RefreshToken: pair.RefreshToken}, nil
 }
-
-// GetUserByID retrieves a user by ID
+func (s *AuthService) Logout(ctx context.Context, refresh string) error {
+	_, err := s.tokens.ConsumeRefreshToken(ctx, refresh)
+	return err
+}
+func (s *AuthService) LogoutAll(ctx context.Context, userID int64) error {
+	return s.tokens.RevokeAll(ctx, userID)
+}
 func (s *AuthService) GetUserByID(ctx context.Context, id int64) (domain.User, error) {
-	return s.userRepo.GetByID(ctx, id)
+	return s.users.GetByID(ctx, id)
+}
+func (s *AuthService) GetUserRoles(ctx context.Context, id int64) ([]string, error) {
+	return s.roles.GetUserRoleNames(ctx, id)
+}
+func (s *AuthService) HasRole(ctx context.Context, id int64, role string) (bool, error) {
+	return s.roles.HasRole(ctx, id, role)
 }
 
-// GetUserRoles retrieves all roles for a user
-func (s *AuthService) GetUserRoles(ctx context.Context, userID int64) ([]string, error) {
-	return s.roleRepo.GetUserRoleNames(ctx, userID)
+func validateRegistration(r domain.RegistrationRequest) []domain.FieldError {
+	var out []domain.FieldError
+	if r.FirstName == "" {
+		out = append(out, domain.FieldError{Field: "firstName", Message: "field is required"})
+	}
+	if r.LastName == "" {
+		out = append(out, domain.FieldError{Field: "lastName", Message: "field is required"})
+	}
+	if !regexp.MustCompile(`^[a-zA-Z0-9_]{3,32}$`).MatchString(r.Nickname) {
+		out = append(out, domain.FieldError{Field: "nickname", Message: "use 3-32 letters, digits or underscores"})
+	}
+	if _, err := mail.ParseAddress(r.Email); err != nil {
+		out = append(out, domain.FieldError{Field: "email", Message: "invalid email"})
+	}
+	if !r.AcceptedPrivacyPolicy {
+		out = append(out, domain.FieldError{Field: "acceptedPrivacyPolicy", Message: "must be accepted"})
+	}
+	return out
+}
+func normalizeEmail(v string) string { return strings.ToLower(strings.TrimSpace(v)) }
+func generateOTP() (string, error) {
+	n, err := rand.Int(rand.Reader, big.NewInt(1000000))
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%06d", n.Int64()), nil
+}
+func (s *AuthService) hashOTP(code string) string {
+	h := hmac.New(sha256.New, []byte(s.otp.Pepper))
+	_, _ = h.Write([]byte(code))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
-// HasRole checks if a user has a specific role
-func (s *AuthService) HasRole(ctx context.Context, userID int64, roleName string) (bool, error) {
-	return s.roleRepo.HasRole(ctx, userID, roleName)
-}
-
-// generateCode generates a random 4-digit verification code
-func generateCode() string {
-	// Seed the random number generator
-	rand.New(rand.NewSource(time.Now().UTC().UnixNano()))
-
-	// Generate a random number between 1000 and 9999
-	code := rand.Intn(9000) + 1000
-
-	return fmt.Sprintf("%d", code)
-}
+var _ = errors.Is

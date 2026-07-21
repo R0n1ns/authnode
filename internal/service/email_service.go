@@ -3,58 +3,29 @@ package service
 import (
 	"fmt"
 	"net/smtp"
+	"strings"
 
 	"authmicro/configs"
 )
 
-type EmailService struct {
-	config configs.SMTPConfig
-}
+type EmailService struct{ config configs.SMTPConfig }
 
-func NewEmailService(config configs.SMTPConfig) *EmailService {
-	return &EmailService{
-		config: config,
-	}
-}
+func NewEmailService(c configs.SMTPConfig) *EmailService { return &EmailService{config: c} }
 
-// SendVerificationCode sends a verification code to the specified email
 func (s *EmailService) SendVerificationCode(to, code string) error {
-	// If SMTP is not configured, just return without error for development purposes
-	if s.config.Username == "" || s.config.Password == "" {
-		fmt.Printf("SMTP not configured, would send code %s to %s\n", code, to)
-		return nil
+	subject := "Your Authnode verification code"
+	body := fmt.Sprintf("Your verification code is %s. It expires soon. If you did not request it, ignore this message.", code)
+	message := strings.Join([]string{
+		"From: " + s.config.From, "To: " + to, "Subject: " + subject,
+		"MIME-Version: 1.0", "Content-Type: text/plain; charset=UTF-8", "", body,
+	}, "\r\n")
+	var auth smtp.Auth
+	if s.config.Username != "" {
+		auth = smtp.PlainAuth("", s.config.Username, s.config.Password, s.config.Host)
 	}
-
-	// Set up authentication
-	auth := smtp.PlainAuth("", s.config.Username, s.config.Password, s.config.Host)
-
-	// Compose message
-	subject := "Your Verification Code"
-	body := fmt.Sprintf("Your verification code is: %s\nThis code will expire in 15 minutes.", code)
-	message := fmt.Sprintf("To: %s\r\nFrom: %s\r\nSubject: %s\r\n\r\n%s", to, s.config.From, subject, body)
-
-	// Send email
 	addr := fmt.Sprintf("%s:%d", s.config.Host, s.config.Port)
-	return smtp.SendMail(addr, auth, s.config.From, []string{to}, []byte(message))
-}
-
-// SendWelcomeEmail sends a welcome email to a newly registered user
-func (s *EmailService) SendWelcomeEmail(to, name string) error {
-	// If SMTP is not configured, just return without error for development purposes
-	if s.config.Username == "" || s.config.Password == "" {
-		fmt.Printf("SMTP not configured, would send welcome email to %s\n", to)
-		return nil
+	if err := smtp.SendMail(addr, auth, s.config.From, []string{to}, []byte(message)); err != nil {
+		return fmt.Errorf("smtp send: %w", err)
 	}
-
-	// Set up authentication
-	auth := smtp.PlainAuth("", s.config.Username, s.config.Password, s.config.Host)
-
-	// Compose message
-	subject := "Welcome to Our Service"
-	body := fmt.Sprintf("Dear %s,\n\nWelcome to our service. Thank you for registering!\n\nBest regards,\nThe Team", name)
-	message := fmt.Sprintf("To: %s\r\nFrom: %s\r\nSubject: %s\r\n\r\n%s", to, s.config.From, subject, body)
-
-	// Send email
-	addr := fmt.Sprintf("%s:%d", s.config.Host, s.config.Port)
-	return smtp.SendMail(addr, auth, s.config.From, []string{to}, []byte(message))
+	return nil
 }

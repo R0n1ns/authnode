@@ -6,206 +6,127 @@ import (
 	"errors"
 	"time"
 
+	"authmicro/internal/domain"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
-
-	"authmicro/internal/domain"
 )
 
-type SessionRepository struct {
-	db *sqlx.DB
+type SessionRepository struct{ db *sqlx.DB }
+
+func NewSessionRepository(db *sqlx.DB) *SessionRepository { return &SessionRepository{db: db} }
+
+func (r *SessionRepository) CreateRegistrationSession(ctx context.Context, s domain.RegistrationSession) (string, error) {
+	s.ID = uuid.NewString()
+	q := `INSERT INTO registration_sessions
+ (id,first_name,last_name,nickname,email,accepted_privacy_policy,code_hash,code_expires,attempts,last_sent_at,created_at)
+ VALUES($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10)`
+	_, err := r.db.ExecContext(ctx, q, s.ID, s.FirstName, s.LastName, s.Nickname, s.Email,
+		s.AcceptedPrivacyPolicy, s.CodeHash, s.CodeExpires, s.LastSentAt, s.CreatedAt)
+	return s.ID, err
 }
 
-func NewSessionRepository(db *sqlx.DB) *SessionRepository {
-	return &SessionRepository{
-		db: db,
-	}
-}
-
-// CreateRegistrationSession creates a new registration session
-func (r *SessionRepository) CreateRegistrationSession(ctx context.Context, session domain.RegistrationSession) (string, error) {
-	query := `
-                INSERT INTO registration_sessions (id, first_name, last_name, nickname, email, accepted_privacy_policy, code, code_expires, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                RETURNING id`
-
-	id := uuid.New().String()
-	now := time.Now().UTC()
-
-	err := r.db.QueryRowContext(
-		ctx,
-		query,
-		id,
-		session.FirstName,
-		session.LastName,
-		session.Nickname,
-		session.Email,
-		session.AcceptedPrivacyPolicy,
-		session.Code,
-		session.CodeExpires,
-		now,
-	).Scan(&id)
-
-	if err != nil {
-		return "", err
-	}
-
-	return id, nil
-}
-
-// GetRegistrationSession retrieves a registration session by ID
 func (r *SessionRepository) GetRegistrationSession(ctx context.Context, id string) (domain.RegistrationSession, error) {
-	query := `
-                SELECT id, first_name, last_name, nickname, email, accepted_privacy_policy, code, code_expires, created_at
-                FROM registration_sessions
-                WHERE id = $1`
-
-	var session domain.RegistrationSession
-	err := r.db.GetContext(ctx, &session, query, id)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return domain.RegistrationSession{}, errors.New("registration session not found")
-		}
-		return domain.RegistrationSession{}, err
+	var s domain.RegistrationSession
+	q := `SELECT id,first_name,last_name,nickname,email,accepted_privacy_policy,code_hash,
+ code_expires,attempts,last_sent_at,created_at FROM registration_sessions WHERE id=$1`
+	if err := r.db.GetContext(ctx, &s, q, id); err != nil {
+		return s, domain.ErrNotFound
 	}
-
-	return session, nil
+	return s, nil
 }
 
-// UpdateRegistrationSessionCode updates the verification code for a registration session
-func (r *SessionRepository) UpdateRegistrationSessionCode(ctx context.Context, id, code string, expires time.Time) error {
-	query := `
-                UPDATE registration_sessions
-                SET code = $1, code_expires = $2
-                WHERE id = $3`
-
-	_, err := r.db.ExecContext(ctx, query, code, expires, id)
+func (r *SessionRepository) UpdateRegistrationCode(ctx context.Context, id, hash string, expires, sentAt time.Time, cooldown time.Duration) error {
+	q := `UPDATE registration_sessions SET code_hash=$1,code_expires=$2,attempts=0,last_sent_at=$3
+ WHERE id=$4 AND last_sent_at <= $5`
+	result, err := r.db.ExecContext(ctx, q, hash, expires, sentAt, id, sentAt.Add(-cooldown))
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return domain.ErrRateLimited
+	}
+	return nil
+}
+func (r *SessionRepository) IncrementRegistrationAttempts(ctx context.Context, id string) error {
+	_, err := r.db.ExecContext(ctx, `UPDATE registration_sessions SET attempts=attempts+1 WHERE id=$1`, id)
 	return err
 }
 
-// DeleteRegistrationSession deletes a registration session
-func (r *SessionRepository) DeleteRegistrationSession(ctx context.Context, id string) error {
-	query := `DELETE FROM registration_sessions WHERE id = $1`
-	_, err := r.db.ExecContext(ctx, query, id)
-	return err
-}
-
-// CreateLoginSession creates a new login session
-func (r *SessionRepository) CreateLoginSession(ctx context.Context, session domain.LoginSession) (string, error) {
-	query := `
-                INSERT INTO login_sessions (id, email, code, code_expires, created_at)
-                VALUES ($1, $2, $3, $4, $5)
-                RETURNING id`
-
-	id := uuid.New().String()
+func (r *SessionRepository) CompleteRegistration(ctx context.Context, sessionID string, u domain.User, role string) error {
+	tx, err := r.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC()
-
-	err := r.db.QueryRowContext(
-		ctx,
-		query,
-		id,
-		session.Email,
-		session.Code,
-		session.CodeExpires,
-		now,
-	).Scan(&id)
-
+	var userID, roleID int64
+	err = tx.QueryRowContext(ctx, `INSERT INTO users(first_name,last_name,nickname,email,email_verified,
+ accepted_privacy_policy,created_at,updated_at) VALUES($1,$2,$3,$4,true,$5,$6,$6) RETURNING id`,
+		u.FirstName, u.LastName, u.Nickname, u.Email, u.AcceptedPrivacyPolicy, now).Scan(&userID)
 	if err != nil {
-		return "", err
+		return err
 	}
-
-	return id, nil
+	if err = tx.QueryRowContext(ctx, `SELECT id FROM roles WHERE name=$1`, role).Scan(&roleID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO user_roles(user_id,role_id,created_at) VALUES($1,$2,$3)`, userID, roleID, now); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM registration_sessions WHERE id=$1`, sessionID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-// GetLoginSessionByEmailAndCode retrieves a login session by email and code
-func (r *SessionRepository) GetLoginSessionByEmailAndCode(ctx context.Context, email, code string) (domain.LoginSession, error) {
-	query := `
-                SELECT id, email, code, code_expires, created_at
-                FROM login_sessions
-                WHERE email = $1 AND code = $2 AND code_expires > NOW()`
-
-	var session domain.LoginSession
-	err := r.db.GetContext(ctx, &session, query, email, code)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return domain.LoginSession{}, errors.New("invalid or expired code")
-		}
-		return domain.LoginSession{}, err
+func (r *SessionRepository) UpsertLoginSession(ctx context.Context, s domain.LoginSession, cooldown time.Duration) error {
+	s.ID = uuid.NewString()
+	q := `INSERT INTO login_sessions(id,email,code_hash,code_expires,attempts,last_sent_at,created_at)
+ VALUES($1,$2,$3,$4,0,$5,$6)
+ ON CONFLICT(email) DO UPDATE SET id=excluded.id,code_hash=excluded.code_hash,
+ code_expires=excluded.code_expires,attempts=0,last_sent_at=excluded.last_sent_at,created_at=excluded.created_at
+ WHERE login_sessions.last_sent_at <= $7 RETURNING id`
+	var id string
+	err := r.db.QueryRowContext(ctx, q, s.ID, s.Email, s.CodeHash, s.CodeExpires, s.LastSentAt, s.CreatedAt,
+		s.LastSentAt.Add(-cooldown)).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.ErrRateLimited
 	}
-
-	return session, nil
+	return err
 }
-
-// DeleteLoginSession deletes a login session
+func (r *SessionRepository) GetLoginSession(ctx context.Context, email string) (domain.LoginSession, error) {
+	var s domain.LoginSession
+	q := `SELECT id,email,code_hash,code_expires,attempts,last_sent_at,created_at FROM login_sessions WHERE email=$1`
+	if err := r.db.GetContext(ctx, &s, q, email); err != nil {
+		return s, domain.ErrInvalidCode
+	}
+	return s, nil
+}
+func (r *SessionRepository) IncrementLoginAttempts(ctx context.Context, id string) error {
+	_, err := r.db.ExecContext(ctx, `UPDATE login_sessions SET attempts=attempts+1 WHERE id=$1`, id)
+	return err
+}
 func (r *SessionRepository) DeleteLoginSession(ctx context.Context, id string) error {
-	query := `DELETE FROM login_sessions WHERE id = $1`
-	_, err := r.db.ExecContext(ctx, query, id)
+	_, err := r.db.ExecContext(ctx, `DELETE FROM login_sessions WHERE id=$1`, id)
 	return err
 }
 
-// DeleteExpiredLoginSessions deletes all expired login sessions
-func (r *SessionRepository) DeleteExpiredLoginSessions(ctx context.Context) error {
-	query := `DELETE FROM login_sessions WHERE code_expires < NOW()`
-	_, err := r.db.ExecContext(ctx, query)
+func (r *SessionRepository) CreateTokenSession(ctx context.Context, s domain.TokenSession) error {
+	q := `INSERT INTO token_sessions(id,user_id,refresh_token_hash,user_agent,ip,expires_at,created_at)
+ VALUES($1,$2,$3,$4,$5,$6,$7)`
+	_, err := r.db.ExecContext(ctx, q, s.ID, s.UserID, s.RefreshTokenHash, s.UserAgent, s.IP, s.ExpiresAt, s.CreatedAt)
 	return err
 }
-
-// CreateTokenSession creates a new token session
-func (r *SessionRepository) CreateTokenSession(ctx context.Context, session domain.TokenSession) error {
-	query := `
-                INSERT INTO token_sessions (id, user_id, refresh_token, user_agent, ip, expires_at, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)`
-
-	_, err := r.db.ExecContext(
-		ctx,
-		query,
-		session.ID,
-		session.UserID,
-		session.RefreshToken,
-		session.UserAgent,
-		session.IP,
-		session.ExpiresAt,
-		session.CreatedAt,
-	)
-	return err
-}
-
-// GetTokenSession retrieves a token session by refresh token
-func (r *SessionRepository) GetTokenSession(ctx context.Context, refreshToken string) (domain.TokenSession, error) {
-	query := `
-                SELECT id, user_id, refresh_token, user_agent, ip, expires_at, created_at
-                FROM token_sessions
-                WHERE refresh_token = $1 AND expires_at > NOW()`
-
-	var session domain.TokenSession
-	err := r.db.GetContext(ctx, &session, query, refreshToken)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return domain.TokenSession{}, errors.New("token expires")
-		}
-		return domain.TokenSession{}, err
+func (r *SessionRepository) ConsumeTokenSession(ctx context.Context, hash string) (domain.TokenSession, error) {
+	var s domain.TokenSession
+	q := `DELETE FROM token_sessions WHERE refresh_token_hash=$1 AND expires_at>NOW()
+ RETURNING id,user_id,refresh_token_hash,user_agent,ip,expires_at,created_at`
+	if err := r.db.GetContext(ctx, &s, q, hash); err != nil {
+		return s, domain.ErrInvalidToken
 	}
-
-	return session, nil
+	return s, nil
 }
-
-// DeleteTokenSession deletes a token session
-func (r *SessionRepository) DeleteTokenSession(ctx context.Context, id string) error {
-	query := `DELETE FROM token_sessions WHERE id = $1`
-	_, err := r.db.ExecContext(ctx, query, id)
-	return err
-}
-
-// DeleteExpiredTokenSessions deletes all expired token sessions
-func (r *SessionRepository) DeleteExpiredTokenSessions(ctx context.Context) error {
-	query := `DELETE FROM token_sessions WHERE expires_at < NOW()`
-	_, err := r.db.ExecContext(ctx, query)
-	return err
-}
-
-// DeleteUserTokenSessions deletes all token sessions for a user
 func (r *SessionRepository) DeleteUserTokenSessions(ctx context.Context, userID int64) error {
-	query := `DELETE FROM token_sessions WHERE user_id = $1`
-	_, err := r.db.ExecContext(ctx, query, userID)
+	_, err := r.db.ExecContext(ctx, `DELETE FROM token_sessions WHERE user_id=$1`, userID)
 	return err
 }
